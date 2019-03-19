@@ -1,5 +1,6 @@
 import argparse
 import collections
+import io
 import json
 import Levenshtein as lev
 import pickle
@@ -27,11 +28,21 @@ def read_names(shelf_filename):
             yield name
 
 
+metric_infos = {
+    'lev': (lev.distance, min),
+    'jaro': (lev.jaro, max),
+    'jaro_winkler': (lev.jaro_winkler, max),
+    'ratio': (lev.ratio, max),
+}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--in-file', default='prh.shelf')
-    ap.add_argument('--out-file', required=True)
+    ap.add_argument('--out-pickle', default=None)
     ap.add_argument('--first-word-only', default=False, action='store_true')
+    ap.add_argument('--result-file-template', default=None, help='e.g. best-{metric}.txt')
+    ap.add_argument('--best-json', default=None)
     args = ap.parse_args()
     names = set(read_names(args.in_file))
     companies = {l: flatten(l, first_word_only=args.first_word_only) for l in names}
@@ -45,13 +56,41 @@ def main():
         for pokeyman, pokeyman_flat in piter:
             pair = (company, pokeyman)
             distances.setdefault(pair, {})  # save some time vs. defaultdict
-            distances[pair]['lev'] = lev.distance(company_flat, pokeyman_flat)
-            distances[pair]['jaro'] = lev.jaro(company_flat, pokeyman_flat)
-            distances[pair]['jaro_winkler'] = lev.jaro_winkler(company_flat, pokeyman_flat)
-            distances[pair]['ratio'] = lev.ratio(company_flat, pokeyman_flat)
+            for metric, (dfunc, cfunc) in metric_infos.items():
+                distances[pair][metric] = dfunc(company_flat, pokeyman_flat)
 
-    with open(args.out_file, 'wb') as outf:
-        pickle.dump(distances, outf, -1)
+    if args.out_pickle:
+        print('Writing %s...' % args.out_pickle)
+        with open(args.out_pickle, 'wb') as outf:
+            pickle.dump(distances, outf, -1)
+
+    if args.result_file_template or args.best_json:
+        best_json_data = collections.defaultdict(dict)
+
+        for metric, (dfunc, cfunc) in metric_infos.items():
+
+            print('Gathering %s...' % metric)
+            metrics = collections.defaultdict(dict)
+            for (company, pokeyman), info in tqdm.tqdm(distances.items()):
+                metrics[company][pokeyman] = info[metric]
+
+            if args.result_file_template:
+                filename = args.result_file_template.replace('{metric}', metric)
+                print('Writing %s...' % filename)
+                outf = open(filename, 'w')
+            else:
+                outf = io.StringIO()
+
+            with outf:
+                for company, pokeymans in tqdm.tqdm(sorted(metrics.items())):
+                    best_name, best_metric = cfunc(pokeymans.items(), key=lambda p: p[1])
+                    print(company, best_name, best_metric, sep=';', file=outf)
+                    best_json_data[company][metric] = (best_name, best_metric)
+
+        if args.best_json:
+            print('Writing %s...' % args.best_json)
+            with open(args.best_json, 'w') as outf:
+                json.dump(best_json_data, outf)
 
 
 if __name__ == '__main__':
